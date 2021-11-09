@@ -1,53 +1,208 @@
 import threading
+import ipaddress
+import re
+import time
+import socket
 
 
 class Monitor:
-    """A dead hand system that monitor changes in network device and act accordingly
+    """A dead hand system that monitor changes in network device and act accordingly."""
 
-    Attributes
-    ----------
-    says_str : str
-        a formatted string to print out what the animal says
-    name : str
-        the name of the animal
-    sound : str
-        the sound that the animal makes
-    num_legs : int
-        the number of legs the animal has (default 4)
-
-    Methods
-    -------
-    says(sound=None)
-        Prints the animals name and what sound it makes
-    """
-
-    def __init__(self, method, target, interval, callback, *args, **kwargs):
-        """Prints what the animals name is and what sound it makes.
-
-        If the argument `sound` isn't passed in, the default Animal
-        sound is used.
+    def __init__(self, method, target, interval, callback, retry=0, offline=True,
+        all=True, delay=None, *args, **kwargs):
+        """Init the monitor with appropriate parameters. Currently support
+        monitor device status with IP address and MAC address. Require the
+        target device to be within same network.
 
         Parameters
         ----------
-        sound : str, optional
-            The sound the animal makes (default is None)
+        method : str
+            Takes "IP" or "MAC" as values. Used to specifies the ways to probe
+            target devices. Must match the type of `target` parameter. Currently
+            only check by IP address is supported.
+
+        target : str || [str]
+            The IP or MAC address of the target device(s). Must match the type
+            of `method` parameter. If multiple target passed in, then all of
+            them will be checked.
+
+        interval : int
+            The number of seconds until next check.
+
+        callback : callable
+            The callback function when device status change meets the required
+            criteria. Will be called with `args` and `kwargs`.
+
+        retry : int, optional
+            Number of times to retry with `interval` apart until the system
+            is considered triggered. Default is no retry.
+
+        offline : bool, optional
+            Triggers the callback function when device went offline or online.
+            Default to when device went offline.
+
+        all : bool, optional
+            Used when multiple targets are passed in. If true, then all targets
+            need to meet criteria before system triggered. Else, only one device
+            status is required. Default to True.
+
+        delay : int, optional
+            The number of seconds delay of execute callback after triggered.
+            Default is None.
+
+        *args : arguments
+            Used for callback function.
+
+        **kwargs : keyword arguments
+            Used for callback function.
 
         Raises
         ------
-        NotImplementedError
-            If no sound is set for the animal or passed in as a
-            parameter.
+        ValueError
+            When method provided is incorrect, or target provided mismatch
+            with the method.
         """
-        self.method = method
+        self.changeTarget(method, target)
+
+        self.interval = interval
+        self.callback = callback
+        self.retry = retry
+        self.offline = offline
+        self.testAll = all
+        self.delay = delay
+        self.args = args
+        self.kwargs = kwargs
+        self.child = None
+        self.__quit = False
 
     def activate(self):
-        print("activate")
+        """Activates the Perimetr system"""
+        if self.child is None:
+            if self.method == "IP":
+                self.child = threading.Thread(target=self.__ipCheck)
+            elif self.method == "MAC":
+                self.child = threading.Thread(target=self.__macCheck)
 
-    def deactivate(self):
-        print("deactivate")
+            self.__quit = False
+            self.child.start()
 
-    def changeTarget(self, method, target):
-        print("change target")
+    def deactivate(self, wait=False):
+        """Deactivates the Perimetr system before the next scheduled check
+
+        Parameters
+        ----------
+        wait : bool, optional
+            Waits for the monitor system to be dearmed. May take as long as
+            the entire `interval`. Default to False.
+        """
+        if self.child is not None:
+            self.__quit = True
+            if wait:
+                self.child.join()
+
+    def changeTarget(self, method, target, force=False):
+        """Changes the designated monitor method and target
+
+        Parameters
+        ----------
+        method : str
+            Takes "IP" or "MAC" as values. Used to specifies the ways to probe
+            target devices. Must match the type of `target` parameter.
+
+        target : str || [str]
+            The IP or MAC address of the target device(s). Must match the type
+            of `method` parameter. If multiple target passed in, then all of
+            them will be checked.
+
+        force : bool, optional
+            Deactivate the system and then change the target if the system is
+            running. May take longer to wait for deactivation. Will reinstate
+            the monitor sequence after target change complete.
+        """
+        restart = False
+        if self.child is not None:
+            if force:
+                restart = True
+                self.deactivate(wait=True)
+            else:
+                return
+
+        if method.lower() == "ip":
+            print("Chose IP method")
+            self.method = "IP"
+            if type(target) == str:
+                target = [target]
+
+            self.target = []
+            for t in target:
+                ip = ipaddress.ip_address(t)
+                self.target.append(ip)
+
+        elif method.lower() == "mac":
+            print("Chose MAC method")
+            self.method = "MAC"
+            if type(target) == str:
+                target = [target]
+
+            self.target = []
+            for t in target:
+                if re.match(r"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$", t) is None:
+                    raise ValueError("Incorrect MAC address passed in")
+                else:
+                    self.target.append(t.upper())
+        else:
+            raise ValueError("Incorrect method choice.")
+
+        if restart:
+            self.activate()
+
+    def __ipCheck(self):
+        attempt = 0
+        while True:
+            if self.__quit:
+                return
+
+            if self.testAll:
+                triggered = True
+            else:
+                triggered = False
+
+            for ip in self.target:
+                try:
+                    socket.gethostbyaddr(ip.exploded)
+                    # Ping success
+                    if not self.offline:
+                        # Trigger when online
+                        if self.testAll:
+                            triggered = triggered and True
+                        else:
+                            triggered = triggered or True
+                    else:
+                        # Trigger when offline
+                        if self.testAll:
+                            triggered = triggered and False
+                except socket.herror:
+                    # Ping failed
+                    if self.offline:
+                        # Trigger when offline
+                        if self.testAll:
+                            triggered = triggered and True
+                        else:
+                            triggered = triggered or True
+                    else:
+                        # Trigger when online
+                        if self.testAll:
+                            triggered = triggered and False
+            if triggered:
+                attempt += 1
+                if attempt > self.retry:
+                    self.callback(*self.args, **self.kwargs)
+                    return
+
+            time.sleep(self.interval)
+
+    def __macCheck(self):
+        print("MAC check")
 
 
 if __name__ == "__main__":
