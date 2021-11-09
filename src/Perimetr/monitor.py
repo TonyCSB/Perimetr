@@ -3,13 +3,14 @@ import ipaddress
 import re
 import time
 import socket
+import os
 
 
 class Monitor:
     """A dead hand system that monitor changes in network device and act accordingly."""
 
-    def __init__(self, method, target, interval, callback, retry=0, offline=True,
-        all=True, delay=None, *args, **kwargs):
+    def __init__(self, method, target, interval, callback, *args, retry=0,
+        offline=True, all=True, delay=None, **kwargs):
         """Init the monitor with appropriate parameters. Currently support
         monitor device status with IP address and MAC address. Require the
         target device to be within same network.
@@ -62,6 +63,8 @@ class Monitor:
             When method provided is incorrect, or target provided mismatch
             with the method.
         """
+
+        self.child = None
         self.changeTarget(method, target)
 
         self.interval = interval
@@ -72,12 +75,11 @@ class Monitor:
         self.delay = delay
         self.args = args
         self.kwargs = kwargs
-        self.child = None
         self.__quit = False
 
     def activate(self):
         """Activates the Perimetr system"""
-        if self.child is None:
+        if self.child is None or not self.child.is_alive():
             if self.method == "IP":
                 self.child = threading.Thread(target=self.__ipCheck)
             elif self.method == "MAC":
@@ -95,7 +97,7 @@ class Monitor:
             Waits for the monitor system to be dearmed. May take as long as
             the entire `interval`. Default to False.
         """
-        if self.child is not None:
+        if self.child is not None and self.child.is_alive():
             self.__quit = True
             if wait:
                 self.child.join()
@@ -128,7 +130,6 @@ class Monitor:
                 return
 
         if method.lower() == "ip":
-            print("Chose IP method")
             self.method = "IP"
             if type(target) == str:
                 target = [target]
@@ -139,7 +140,6 @@ class Monitor:
                 self.target.append(ip)
 
         elif method.lower() == "mac":
-            print("Chose MAC method")
             self.method = "MAC"
             if type(target) == str:
                 target = [target]
@@ -168,29 +168,28 @@ class Monitor:
                 triggered = False
 
             for ip in self.target:
-                try:
-                    socket.gethostbyaddr(ip.exploded)
+                if reachable(ip):
                     # Ping success
                     if not self.offline:
-                        # Trigger when online
+                        # Online Triggered
                         if self.testAll:
                             triggered = triggered and True
                         else:
                             triggered = triggered or True
                     else:
-                        # Trigger when offline
+                        # Offline NOT Triggered
                         if self.testAll:
                             triggered = triggered and False
-                except socket.herror:
+                else:
                     # Ping failed
                     if self.offline:
-                        # Trigger when offline
+                        # Offline Triggered
                         if self.testAll:
                             triggered = triggered and True
                         else:
                             triggered = triggered or True
                     else:
-                        # Trigger when online
+                        # Online NOT Triggered
                         if self.testAll:
                             triggered = triggered and False
             if triggered:
@@ -198,11 +197,24 @@ class Monitor:
                 if attempt > self.retry:
                     self.callback(*self.args, **self.kwargs)
                     return
+            else:
+                attempt = 0
 
+            if self.__quit:
+                return
             time.sleep(self.interval)
 
     def __macCheck(self):
         print("MAC check")
+
+
+def reachable(ip):
+    try:
+        socket.gethostbyaddr(ip.exploded)
+        return True
+    except socket.herror:
+        response = os.system("ping -c 4 {0} > /dev/null 2>&1".format(ip.exploded))
+        return response == 0
 
 
 if __name__ == "__main__":
