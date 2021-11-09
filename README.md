@@ -1,2 +1,3 @@
 # Perimetr
-A python program functioning as a dead hand system
+
+A dead hand system that monitor changes in network device and act accordingly.
